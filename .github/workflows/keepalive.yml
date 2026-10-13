@@ -1,0 +1,25 @@
+name: keepalive
+
+# 保活任务：每月 1 号自动产生一个空提交，保持仓库活跃，
+# 避免 GitHub 因「60 天无活动」自动暂停 douyin-feed-sync 的定时任务。
+on:
+  schedule:
+    - cron: "0 2 1 * *"   # 每月 1 号 02:00 (UTC)
+  workflow_dispatch:      # 允许手动触发
+
+permissions:
+  contents: write         # 明确授予推送权限，防止账号默认只读导致失败
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 空提交保活
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keepalive $(date -u +%Y-%m-%d)"
+          git push
