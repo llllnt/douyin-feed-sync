@@ -576,7 +576,7 @@ def main():
     quality = "SD1" if len(rooms_cfg) > 24 else None  # 房间多时降标清（监播小卡片足够）
     out = []
     live_n = 0
-    for cfg in rooms_cfg:
+    for idx, cfg in enumerate(rooms_cfg, 1):
         link = str(cfg["link"]).strip()
         name = str(cfg.get("name") or "").strip()
         try:
@@ -587,10 +587,10 @@ def main():
             status = "live" if (r.get("status") == "live" and direct) else "offline"
             if status == "live":
                 live_n += 1
-            log(f"  {'✓ 直播中' if status == 'live' else '○ 未开播'}  {name or link}")
+            log(f"  [{idx}/{len(rooms_cfg)}] {'✓ 直播中' if status == 'live' else '○ 未开播'}")
         except Exception as e:
             direct, status = "", "offline"
-            log(f"  ✗ 解析失败  {name or link}: {str(e)[:90]}")
+            log(f"  [{idx}/{len(rooms_cfg)}] ✗ 解析失败: {re.sub(r'https?://\\S+', '[url]', str(e))[:60]}")
         m = re.search(r"(\d{6,})", link)
         rid = m.group(1) if m else link
         out.append({
