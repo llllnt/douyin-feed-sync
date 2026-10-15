@@ -50,6 +50,33 @@ def other_active():
         return 0
 
 
+WHITELIST_JSONBIN = "https://api.jsonbin.io/v3/b/6ad0b18bac6210605a337140/latest"
+WHITELIST_MIRROR = "https://extendsclass.com/api/json-storage/bin/dfbdafa"
+
+
+def mirror_whitelist():
+    """白名单配置 jsonbin→extendsclass 镜像（前端双通道读取兜底：jsonbin 境外不可达时走国内镜像）"""
+    key = os.environ.get("JSONBIN_KEY", "").strip()
+    if not key:
+        return
+    try:
+        req = urllib.request.Request(WHITELIST_JSONBIN + "?_t=%d" % int(time.time() * 1000),
+                                     headers={"X-Access-Key": key, "User-Agent": "wom-mirror"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = json.loads(r.read().decode("utf-8", "ignore")).get("record")
+        if not isinstance(data, dict) or not isinstance(data.get("members"), list):
+            log("白名单镜像源数据异常，本轮跳过")
+            return
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(WHITELIST_MIRROR, data=body, method="PUT",
+                                     headers={"Content-Type": "application/json", "User-Agent": "wom-mirror"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            r.read()
+        log("白名单镜像已同步 extendsclass")
+    except Exception as e:
+        log("白名单镜像同步失败（下轮继续）: %s" % str(e)[:80])
+
+
 def main():
     if other_active() > 0:
         log("已有实例在跑，本次触发秒退（断链后备不叠加）")
@@ -60,6 +87,7 @@ def main():
             subprocess.run([sys.executable, "douyin_feed_sync.py"], cwd=BASE, timeout=SYNC_TIMEOUT)
         except Exception as e:
             log("本轮同步异常（下轮继续）: %s" % str(e)[:80])
+        mirror_whitelist()
         if i < ITERATIONS:
             time.sleep(INTERVAL)
             if other_active() > 0:
