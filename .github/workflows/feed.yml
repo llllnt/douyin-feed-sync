@@ -29,4 +29,5 @@ jobs:
           FEED_BIN_URL: ${{ secrets.FEED_BIN_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_FILE: feed.yml
+          JSONBIN_KEY: ${{ secrets.JSONBIN_KEY }}
         run: python3 feed_loop.py
