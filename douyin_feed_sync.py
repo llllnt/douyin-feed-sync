@@ -572,6 +572,16 @@ def main():
     rooms_cfg = [r for r in (data.get("rooms") or []) if isinstance(r, dict) and r.get("link")]
     log(f"云端清单 {len(rooms_cfg)} 间，开始逐间解析…")
 
+    # 读取当前地址簿作兜底缓存：解析失败的房间沿用其中 48 小时内更新的旧地址
+    # （抖音签名地址约 7 天有效；风控/限流是常态，失败不应清空可用地址）
+    prev = {}
+    try:
+        cur = read_json(f"{feed_bin}?_t={int(time.time() * 1000)}", timeout=15)
+        if time.time() - (cur.get("updated") or 0) < 48 * 3600:
+            prev = {str(r.get("id") or ""): r for r in (cur.get("rooms") or []) if isinstance(r, dict)}
+    except Exception:
+        pass
+
     opener = urllib.request.build_opener()
     quality = "SD1" if len(rooms_cfg) > 24 else None  # 房间多时降标清（监播小卡片足够）
     out = []
@@ -589,8 +599,16 @@ def main():
                 live_n += 1
             log(f"  [{idx}/{len(rooms_cfg)}] {'✓ 直播中' if status == 'live' else '○ 未开播'}")
         except Exception as e:
-            direct, status = "", "offline"
-            log(f"  [{idx}/{len(rooms_cfg)}] ✗ 解析失败: {re.sub(r'https?://\\S+', '[url]', str(e))[:60]}")
+            m0 = re.search(r"(\d{6,})", link)
+            rid0 = m0.group(1) if m0 else link
+            old = prev.get(rid0)
+            if old and old.get("status") == "live" and old.get("url"):
+                direct, status = old["url"], "live"
+                live_n += 1
+                log(f"  [{idx}/{len(rooms_cfg)}] ⚠ 解析失败沿用旧地址")
+            else:
+                direct, status = "", "offline"
+                log(f"  [{idx}/{len(rooms_cfg)}] ✗ 解析失败: {re.sub(r'https?://\\S+', '[url]', str(e))[:60]}")
         m = re.search(r"(\d{6,})", link)
         rid = m.group(1) if m else link
         out.append({
