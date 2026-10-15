@@ -1,20 +1,21 @@
 name: douyin-feed-sync
 
-# 每 10 分钟解析一次抖音直播间状态与拉流地址，推送云端地址簿。
-# 观看端浏览器轮询地址簿直连抖音 CDN 播放，全程无需本地小助手。
+# 无人值守供数主链：每次运行循环同步约 4.5 小时（每 10 分钟一轮），结束时自动接力下一次运行。
+# cron 每 10 分钟仅作断链后备（feed_loop.py 互斥检查：已有实例在跑时秒退，不叠加）。
+# 注意：不要加 concurrency 组——排队会让后备实例堆积成长循环。
 on:
   schedule:
     - cron: "*/10 * * * *"
   workflow_dispatch: # 允许在 Actions 页面手动点 Run workflow 立即跑一次
 
-concurrency:
-  group: feed-sync
-  cancel-in-progress: false
+permissions:
+  actions: write # 接力触发下一次运行（workflow_dispatch）
+  contents: read
 
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
 
@@ -22,8 +23,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 解析直播间并推送地址簿
+      - name: 互斥检查 + 循环同步 + 接力
         env:
           CHAT_BIN_URL: ${{ secrets.CHAT_BIN_URL }}
           FEED_BIN_URL: ${{ secrets.FEED_BIN_URL }}
-        run: python3 douyin_feed_sync.py
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_FILE: feed.yml
+        run: python3 feed_loop.py
