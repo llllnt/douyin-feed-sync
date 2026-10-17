@@ -18,7 +18,7 @@ import urllib.request
 
 QUALITY = "HD1"                # 默认画质档位：FULL_HD1(原画) / HD1(高清) / SD1 / SD2(省流)
 REQUEST_GAP = 0.8              # 每个直播间解析间隔（秒），避免触发风控
-AGENT_VERSION_GA = "ga-1.0.0"  # 云端写入端标识（地址簿 agent 字段，便于排查区分 Mac 小助手）
+AGENT_VERSION_GA = "ga-1.1.0"  # 云端写入端标识（地址簿 agent 字段，便于排查区分 Mac 小助手）
 
 
 def log(msg):
@@ -529,7 +529,7 @@ def fetch_room(link, opener, quality=None):
     room = room_list[0]
     anchor = ((payload.get("user") or {}).get("nickname")) or ""
     if room.get("status") != 2:
-        return {"rid": web_rid, "anchor": anchor, "status": "offline", "url": "", "urlFull": ""}
+        return {"rid": web_rid, "anchor": anchor, "status": "offline", "url": "", "urlFull": "", "urlHls": ""}
     su = room.get("stream_url") or {}
     flv = su.get("flv_pull_url") or {}
     if not flv:
@@ -537,7 +537,11 @@ def fetch_room(link, opener, quality=None):
     q = quality or QUALITY
     url = flv.get(q) or flv.get("HD1") or next(iter(flv.values()))
     url_full = flv.get("FULL_HD1") or url
-    return {"rid": web_rid, "anchor": anchor, "status": "live", "url": url, "urlFull": url_full}
+    # V136：同时取 HLS(m3u8) 地址——监播墙多路同播时 flv 长连接会撞浏览器单域名 6 条 HTTP/1.1 上限
+    # （CDN 把 7+ 路分在同一节点时第 7 路永久排队卡「加载中」）；HLS 分片短请求天然规避，前端墙卡片优先 HLS、失败回退 flv
+    hls_map = su.get("hls_pull_url_map") or {}
+    url_hls = hls_map.get(q) or hls_map.get("HD1") or (next(iter(hls_map.values())) if hls_map else "") or su.get("hls_pull_url") or ""
+    return {"rid": web_rid, "anchor": anchor, "status": "live", "url": url, "urlFull": url_full, "urlHls": url_hls}
 
 
 feed_status = {"ok": None, "at": 0, "error": ""}
@@ -594,6 +598,7 @@ def main():
             if not name:
                 name = r.get("anchor") or name
             direct = r.get("url") or ""
+            hls = r.get("urlHls") or ""
             status = "live" if (r.get("status") == "live" and direct) else "offline"
             if status == "live":
                 live_n += 1
@@ -604,10 +609,11 @@ def main():
             old = prev.get(rid0)
             if old and old.get("status") == "live" and old.get("url"):
                 direct, status = old["url"], "live"
+                hls = old.get("urlHls") or ""
                 live_n += 1
                 log(f"  [{idx}/{len(rooms_cfg)}] ⚠ 解析失败沿用旧地址")
             else:
-                direct, status = "", "offline"
+                direct, status, hls = "", "offline", ""
                 log(f"  [{idx}/{len(rooms_cfg)}] ✗ 解析失败: {re.sub(r'https?://\\S+', '[url]', str(e))[:60]}")
         m = re.search(r"(\d{6,})", link)
         rid = m.group(1) if m else link
@@ -616,6 +622,7 @@ def main():
             "name": name or rid,
             "status": status,
             "url": https_url(direct) if direct else "",
+            "urlHls": https_url(hls) if hls else "",
             "src": "chat",
         })
         time.sleep(REQUEST_GAP)
