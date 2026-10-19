@@ -1,0 +1,29 @@
+name: feed-watchdog
+
+# 断链自愈看门狗：每 10 分钟检查监播地址簿新鲜度（与 feed.yml 的 */10 错开 7 分钟，
+# 两条独立调度同时失效的概率极低）。发现断链/卡死时自动取消卡死实例并重启解析链。
+on:
+  schedule:
+    - cron: "7-59/10 * * * *"
+  workflow_dispatch: # 允许在 Actions 页面手动跑一次检查
+
+permissions:
+  actions: write  # 取消卡死实例 + workflow_dispatch 重启解析链
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 检查地址簿新鲜度并按需自愈
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_FILE: feed.yml
+        run: python3 feed_selfheal.py
