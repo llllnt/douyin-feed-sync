@@ -1,12 +1,22 @@
 name: live-notify
 
-# 开播通知：每 10 分钟检查地址簿状态跳变（与 feed.yml 的 */10、watchdog 的 7-59/10
-# 错开到 3 分，三条独立调度互不挤占）。发现「未开播→开播」推送飞书群机器人。
+# 开播通知，两条调度：
+# 1) 常规：每 10 分钟读地址簿，检测「未开播→开播」跳变推送飞书群机器人。
+#    脚本在 burst 窗口内（UTC 21:45~00:25，北京 5:45~8:25）自动跳过，避免重复通知。
+# 2) burst 高频监看：UTC 21:50（北京 5:50）启动一个 150 分钟长任务，每 40 秒
+#    直接解析抖音接口检测开播（绕开地址簿 10 分钟刷新粒度），覆盖 6/7/8 点
+#    整点开播高峰。与 feed.yml 的 */10、watchdog 的 7-59/10 错开到 3 分/50 分。
 # 未配置 NOTIFY_WEBHOOK_URL secret 时脚本静默跳过，可先部署后配置。
 on:
   schedule:
-    - cron: "3-59/10 * * * *"
-  workflow_dispatch: # 允许手动触发一次检测
+    - cron: "3-59/10 * * * *"  # 常规 10 分钟轮询
+    - cron: "50 21 * * *"      # burst：北京 5:50 起高频监看 150 分钟
+  workflow_dispatch:
+    inputs:
+      burst_minutes:
+        description: "手动高频监看分钟数（0 或不填=单次常规检测）"
+        required: false
+        default: "0"
 
 permissions:
   contents: read # 只读代码，不写仓库、不动其他工作流
@@ -14,7 +24,7 @@ permissions:
 jobs:
   notify:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 170 # burst 150 分钟 + 启动余量；常规运行 1 分钟内结束
     steps:
       - uses: actions/checkout@v4
 
@@ -26,4 +36,6 @@ jobs:
         env:
           NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
           NOTIFY_SECRET: ${{ secrets.NOTIFY_SECRET }}
+          BURST_MINUTES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.burst_minutes || (github.event.schedule == '50 21 * * *' && '150' || '0') }}
+          POLL_SEC: "40"
         run: python3 live_notify.py
