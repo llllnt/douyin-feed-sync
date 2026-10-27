@@ -1,0 +1,45 @@
+name: audio-watch
+
+# 直播间无声告警：UTC 22:00 ~ 次日 16:00（北京 6:00-24:00 直播时段）长任务循环。
+# 每 2 分钟一轮：ffmpeg 并行抓 8 路在播房间 30 秒音频 → Silero VAD 判语音占比
+# （models/silero_vad_16k.onnx）→ 距上次语音满 5 分钟且本事件未告警过 → 推飞书群。
+# 运行方式与 feed 链同构：主 cron 21:55 UTC 启动，单实例跑约 5 小时后自接力 dispatch
+# 下一段（audio_watch.py 互斥检查：已有实例在跑时秒退）；每 2 小时后备 cron 兜底。
+# 调度错开：feed */10、watchdog 7-59/10、live-notify 3-59/10 + 50 21。
+on:
+  schedule:
+    - cron: "55 21 * * *"                     # 主启动：北京 5:55，窗口前 5 分钟
+    - cron: "17 22,0,2,4,6,8,10,12,14 * * *" # 断链后备（互斥秒退，不叠加）
+  workflow_dispatch:
+    inputs:
+      watch_minutes:
+        description: "手动监看分钟数（0 或不填=按窗口正常跑）"
+        required: false
+        default: "0"
+
+permissions:
+  actions: write # 接力触发下一段（workflow_dispatch）
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 345 # 单段 300 分钟 + 启动余量；窗口内由接力/后备续上
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装 VAD 依赖
+        run: pip install -q onnxruntime numpy
+
+      - name: 无声监看循环
+        env:
+          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+          NOTIFY_SECRET: ${{ secrets.NOTIFY_SECRET }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_FILE: audio-watch.yml
+          WATCH_MINUTES_OVERRIDE: ${{ github.event.inputs.watch_minutes }}
+        run: python3 audio_watch.py
