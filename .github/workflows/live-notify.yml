@@ -1,0 +1,29 @@
+name: live-notify
+
+# 开播通知：每 10 分钟检查地址簿状态跳变（与 feed.yml 的 */10、watchdog 的 7-59/10
+# 错开到 3 分，三条独立调度互不挤占）。发现「未开播→开播」推送飞书群机器人。
+# 未配置 NOTIFY_WEBHOOK_URL secret 时脚本静默跳过，可先部署后配置。
+on:
+  schedule:
+    - cron: "3-59/10 * * * *"
+  workflow_dispatch: # 允许手动触发一次检测
+
+permissions:
+  contents: read # 只读代码，不写仓库、不动其他工作流
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 检测开播跳变并推送飞书
+        env:
+          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+          NOTIFY_SECRET: ${{ secrets.NOTIFY_SECRET }}
+        run: python3 live_notify.py
