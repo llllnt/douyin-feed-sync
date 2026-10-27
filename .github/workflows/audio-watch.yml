@@ -32,6 +32,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: 安装 ffmpeg（GA 运行器不自带）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+
       - name: 安装 VAD 依赖
         run: pip install -q onnxruntime numpy
 
