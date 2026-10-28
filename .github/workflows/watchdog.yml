@@ -1,20 +1,23 @@
 name: feed-watchdog
 
-# 断链自愈看门狗：每 10 分钟检查监播地址簿新鲜度（与 feed.yml 的 */10 错开 7 分钟，
-# 两条独立调度同时失效的概率极低）。发现断链/卡死时自动取消卡死实例并重启解析链。
+# 断链自愈看门狗（自接力版）：单次运行内每 10 分钟检查一轮，跑满 WATCH_RUN_MINUTES
+# 后接力触发下一次运行。两条监控链：
+# 1) 地址簿（afcbbaf）新鲜度 → 断链/卡死时取消卡死实例并 dispatch feed.yml 重启解析链；
+# 2) 开播通知状态 bin（dcdcbca）新鲜度 → 通知链断链时 dispatch live-notify.yml 重启。
+# cron 7-59/10 仅作后备（本仓库 cron 受 GitHub 限流严重，实测间隔可达数小时）。
 on:
   schedule:
     - cron: "7-59/10 * * * *"
   workflow_dispatch: # 允许在 Actions 页面手动跑一次检查
 
 permissions:
-  actions: write  # 取消卡死实例 + workflow_dispatch 重启解析链
+  actions: write  # 取消卡死实例 + workflow_dispatch 重启解析链/通知链
   contents: read
 
 jobs:
   watchdog:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 150 # WATCH_RUN_MINUTES 120 + 余量
     steps:
       - uses: actions/checkout@v4
 
@@ -22,8 +25,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 检查地址簿新鲜度并按需自愈
+      - name: 循环巡检 + 接力
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKFLOW_FILE: feed.yml
+          WATCH_RELAY_FILE: watchdog.yml
+          FEED_BIN_URL: https://extendsclass.com/api/json-storage/bin/afcbbaf
+          NOTIFY_STATE_BIN_URL: https://extendsclass.com/api/json-storage/bin/dcdcbca
+          NOTIFY_WORKFLOW_FILE: live-notify.yml
+          WATCH_INTERVAL: "600"
+          WATCH_RUN_MINUTES: "120"
         run: python3 feed_selfheal.py
