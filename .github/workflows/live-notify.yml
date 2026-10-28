@@ -1,30 +1,33 @@
 name: live-notify
 
-# 开播通知，两条调度：
-# 1) 常规：每 10 分钟读地址簿，检测「未开播→开播」跳变推送飞书群机器人。
-#    脚本在 burst 窗口内（UTC 21:45~00:25，北京 5:45~8:25）自动跳过，避免重复通知。
-# 2) burst 高频监看：UTC 21:50（北京 5:50）启动一个 150 分钟长任务，每 40 秒
-#    直接解析抖音接口检测开播（绕开地址簿 10 分钟刷新粒度），覆盖 6/7/8 点
-#    整点开播高峰。与 feed.yml 的 */10、watchdog 的 7-59/10 错开到 3 分/50 分。
-# 未配置 NOTIFY_WEBHOOK_URL secret 时脚本静默跳过，可先部署后配置。
+# 开播通知自接力链（根治 GitHub cron 限流——本仓库 10 分钟 cron 实测一天仅触发数次，
+# live-notify 曾 4 小时零运行大面积漏报；workflow_dispatch 不受影响，feed.yml 同模式
+# 已稳定运行多日）：
+# - 单次运行 = 一个检测循环：常规时段每 60s 读地址簿对比状态 bin；burst 窗口
+#   （UTC 21:45~次日 00:25，北京 5:45~8:25 整点开播高峰）自动切 40s 高频并直接解析
+#   抖音接口，绕开地址簿 10 分钟刷新粒度；
+# - 跑满 RUN_MINUTES（默认 120 分钟）后 workflow_dispatch 接力下一次运行；
+# - 两条 cron 仅作断链后备（脚本互斥检查：已有实例在跑时秒退，不叠加）；
+# - watchdog（feed_selfheal.py）另监控通知状态 bin 新鲜度，断链时自动 dispatch 重启。
 on:
   schedule:
-    - cron: "3-59/10 * * * *"  # 常规 10 分钟轮询
-    - cron: "50 21 * * *"      # burst：北京 5:50 起高频监看 150 分钟
+    - cron: "3-59/10 * * * *"  # 断链后备
+    - cron: "50 21 * * *"      # 断链后备（burst 窗口由运行内自动切换，不再依赖本条）
   workflow_dispatch:
     inputs:
       burst_minutes:
-        description: "手动高频监看分钟数（0 或不填=单次常规检测）"
+        description: "手动高频监看分钟数（0 或不填=常规自接力循环）"
         required: false
         default: "0"
 
 permissions:
-  contents: read # 只读代码，不写仓库、不动其他工作流
+  actions: write # 接力触发下一次运行（workflow_dispatch）
+  contents: read
 
 jobs:
   notify:
     runs-on: ubuntu-latest
-    timeout-minutes: 170 # burst 150 分钟 + 启动余量；常规运行 1 分钟内结束
+    timeout-minutes: 200 # RUN_MINUTES 120 + burst 手动 150 的余量 + 启动开销
     steps:
       - uses: actions/checkout@v4
 
@@ -32,10 +35,13 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 检测开播跳变并推送飞书
+      - name: 开播检测循环 + 接力
         env:
           NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
           NOTIFY_SECRET: ${{ secrets.NOTIFY_SECRET }}
-          BURST_MINUTES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.burst_minutes || (github.event.schedule == '50 21 * * *' && '150' || '0') }}
+          BURST_MINUTES: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.burst_minutes || '0' }}
           POLL_SEC: "40"
+          RUN_MINUTES: "120"
+          WORKFLOW_FILE: live-notify.yml
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: python3 live_notify.py
