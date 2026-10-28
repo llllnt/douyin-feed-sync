@@ -1,21 +1,24 @@
 # -*- coding: utf-8 -*-
-"""开播通知（GitHub Actions 版，与 feed_loop 解析链解耦）。
+"""开播通知（GitHub Actions 版，自接力循环链）。
 
-两种运行模式：
-1. 常规模式（cron 每 10 分钟）：读监播地址簿（extendsclass afcbbaf）→ 与状态
-   bin（dcdcbca）快照对比 → 发现「未开播 → 开播」跳变 → 推送飞书群机器人卡片。
-2. 高频监看模式（burst，每天 UTC 21:50 即北京 5:50 启动，持续 150 分钟覆盖
-   北京 6/7/8 点整点开播高峰）：每 POLL_SEC 秒一轮，对地址簿仍显示「未开播」
-   的房间直接调用 douyin_feed_sync.fetch_room 实时解析抖音接口，绕开地址簿
-   10 分钟刷新粒度，实现约 40~80 秒级开播检测。
+架构（与 feed_loop.py 同款，根治 GitHub cron 限流）：
+- 单次运行 = 一个检测循环：常规时段每 REGULAR_POLL_SEC（默认 60s）读监播地址簿
+  （extendsclass afcbbaf）对比状态 bin（dcdcbca）；进入 burst 窗口
+  （UTC 21:45~次日 00:25，北京 5:45~8:25 整点开播高峰）自动切每 POLL_SEC 40s
+  并对地址簿仍显示未开播的房间直接调用 douyin_feed_sync.fetch_room 实时解析。
+- 跑满 RUN_MINUTES（默认 120 分钟）后 workflow_dispatch 接力触发下一次运行。
+  本仓库 cron 调度受 GitHub 严重限流（实测 10 分钟 cron 一天仅触发数次，
+  live-notify 曾因此 4 小时零运行大面积漏报），workflow_dispatch 不受影响。
+- cron（3-59/10 与 50 21）仅作断链后备；脚本互斥检查（同名工作流已有在跑实例
+  时秒退），后备触发不会叠加。
+- watchdog（feed_selfheal.py）另监控本链状态 bin 新鲜度，断链时自动 dispatch 重启。
 
 规则：
 - 「未开播 → 开播」且此前已连续离线满 MIN_OFFLINE_SEC（默认 600 秒）才提醒——
   短暂掉线抖动不重复提醒，整点真开播必提醒；
 - 首次运行只建立基线快照，不把已在播的房间当「新开播」轰炸；
 - 多间同时开播合并为一条卡片；推送失败保留旧快照，下一轮自动重试；
-- 状态 bin 仅在内容变化时写入（burst 结束时兜底写一次，含 mode 标记）；
-- 常规模式在 burst 窗口内（UTC 21:45 ~ 次日 00:25）自动跳过，避免重复通知；
+- 状态 bin 仅在内容变化时写入（每次运行结束兜底写一次，含 mode 标记）；
 - 未配置 NOTIFY_WEBHOOK_URL 时静默跳过（工作流可先行部署）；
 - 开启飞书签名校验时（NOTIFY_SECRET）自动附加 timestamp+sign。
 
@@ -42,14 +45,22 @@ MONITOR_BASE = os.environ.get(
     "MONITOR_BASE_URL", "https://pv-h6bbdwiu.aiproject.leqeegroup.com")
 MIN_OFFLINE_SEC = float(os.environ.get("NOTIFY_MIN_OFFLINE_SEC", "600"))  # 掉线满 10 分钟再开播才提醒
 
-BURST_MINUTES = float(os.environ.get("BURST_MINUTES", "0"))   # >0 进入高频监看
+BURST_MINUTES = float(os.environ.get("BURST_MINUTES", "0"))   # >0 强制高频监看（手动测试用）
 POLL_SEC = float(os.environ.get("POLL_SEC", "40"))            # burst 轮询间隔
 BURST_REQ_GAP = float(os.environ.get("BURST_REQ_GAP", "0.5"))  # burst 每间解析间隔
 DIRECT_RESOLVE = os.environ.get("DIRECT_RESOLVE", "1") != "0"  # 0=禁用直接解析（兜底/测试）
-WINDOW_GUARD = os.environ.get("WINDOW_GUARD", "1") != "0"      # 0=禁用窗口互斥（测试）
-# burst 窗口：UTC 21:45 ~ 次日 00:25（北京 5:45 ~ 8:25），常规 cron 在窗口内跳过
+RUN_MINUTES = float(os.environ.get("RUN_MINUTES", "120"))      # 单次运行时长，结束前接力下一次
+REGULAR_POLL_SEC = float(os.environ.get("REGULAR_POLL_SEC", "60"))  # 常规轮询间隔
+# burst 窗口：UTC 21:45 ~ 次日 00:25（北京 5:45 ~ 8:25），窗口内自动切高频+直接解析
 GUARD_START_MIN = 21 * 60 + 45
 GUARD_END_MIN = 25
+
+# 自接力/互斥（与 feed_loop.py 同款机制）
+REPO = os.environ.get("GITHUB_REPOSITORY", "")
+RUN_ID = os.environ.get("GITHUB_RUN_ID", "")
+WORKFLOW_NAME = os.environ.get("GITHUB_WORKFLOW", "live-notify")
+WORKFLOW_REF = os.environ.get("WORKFLOW_FILE", "live-notify.yml")
+TOKEN = os.environ.get("GITHUB_TOKEN", "")
 
 CST = timezone(timedelta(hours=8))  # 东八区
 
@@ -72,6 +83,45 @@ def http_json(method, url, body=None, timeout=15):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read().decode("utf-8", "ignore")
         return json.loads(raw) if raw else {}
+
+
+def gh_api(method, path, body=None):
+    req = urllib.request.Request(
+        "https://api.github.com/repos/%s%s" % (REPO, path),
+        data=json.dumps(body).encode() if body is not None else None,
+        method=method,
+        headers={"Authorization": "Bearer " + TOKEN, "Accept": "application/vnd.github+json",
+                 "Content-Type": "application/json", "User-Agent": "live-notify"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        raw = r.read().decode("utf-8", "ignore")
+        return json.loads(raw) if raw else {}
+
+
+def other_active():
+    """同名工作流的其他在跑实例数（互斥依据）。查询失败按无冲突继续。"""
+    if not TOKEN:
+        return 0
+    try:
+        d = gh_api("GET", "/actions/runs?status=in_progress&per_page=50")
+        return sum(1 for r in d.get("workflow_runs", [])
+                   if str(r.get("id")) != str(RUN_ID) and r.get("name") == WORKFLOW_NAME)
+    except Exception as e:
+        log("互斥检查失败（按无冲突继续）: %s" % str(e)[:80])
+        return 0
+
+
+def relay():
+    """接力触发下一次运行（workflow_dispatch 不受 cron 延迟/限流影响）。"""
+    if not TOKEN:
+        log("无 GITHUB_TOKEN，跳过接力（依赖 cron 后备）")
+        return False
+    try:
+        gh_api("POST", "/actions/workflows/%s/dispatches" % WORKFLOW_REF, {"ref": "main"})
+        log("已接力触发下一次运行")
+        return True
+    except Exception as e:
+        log("接力触发失败（cron 后备将择机重启，watchdog 亦会兜底）: %s" % str(e)[:80])
+        return False
 
 
 def load_state():
@@ -238,57 +288,55 @@ def save_state(prev, mode):
     http_json("PUT", STATE_BIN, body)
 
 
-def run_single(now):
-    if WINDOW_GUARD and in_burst_window(now):
-        log("处于高频监看窗口（北京 5:45-8:25），由 burst 任务负责，本次跳过")
-        return 0
-    prev = load_state()
-    rc, changed = check_once(now, prev, burst=False)
-    if changed:
-        save_state(prev, "cron")
-        log("状态快照已更新（%d 间）" % len(prev))
-    return rc
-
-
-def run_burst(now):
-    if not WEBHOOK:
-        log("未配置 NOTIFY_WEBHOOK_URL，跳过（部署占位，配置后自动生效）")
-        return 0
-    log("进入高频监看：每 %ds 一轮，持续 %d 分钟（覆盖北京 6/7/8 点整点开播）"
-        % (POLL_SEC, BURST_MINUTES))
-    if _dfs is None:
+def run_loop(now, force_burst=False):
+    """检测主循环：跑到截止时间后接力下一次运行。force_burst=手动强制高频模式。"""
+    duration = BURST_MINUTES if force_burst else RUN_MINUTES
+    mode_label = "burst(手动)" if force_burst else "常规"
+    log("本次运行：%s模式，每轮检测至 %d 分钟后接力（北京时间 %s 起）"
+        % (mode_label, duration,
+           datetime.fromtimestamp(now, tz=CST).strftime("%m-%d %H:%M")))
+    if force_burst and _dfs is None:
         log("⚠ 未能导入 douyin_feed_sync，退化为仅读地址簿（10 分钟粒度）")
     prev = load_state()
-    deadline = now + BURST_MINUTES * 60
+    deadline = now + duration * 60
     rounds = 0
     any_fail = 0
     while True:
         t0 = time.time()
+        burst_now = force_burst or in_burst_window(t0)
+        poll = POLL_SEC if burst_now else REGULAR_POLL_SEC
         try:
-            rc, changed = check_once(t0, prev, burst=True)
+            rc, changed = check_once(t0, prev, burst=burst_now)
             any_fail = any_fail or rc
             if changed:
-                save_state(prev, "burst")
+                save_state(prev, "burst" if burst_now else "cron")
         except Exception as e:
             log("本轮异常（继续下一轮）: %s" % str(e)[:100])
         rounds += 1
         remain = deadline - time.time()
         if remain <= 0:
             break
-        time.sleep(min(POLL_SEC, max(1.0, remain)))
-    save_state(prev, "burst")  # 兜底落盘（含 mode 标记）
-    log("高频监看结束，共 %d 轮" % rounds)
+        time.sleep(min(poll, max(1.0, remain)))
+    try:
+        save_state(prev, "burst" if force_burst else "cron")  # 兜底落盘（含 mode 标记）
+    except Exception as e:
+        log("兜底落盘失败: %s" % str(e)[:80])
+    log("本次运行结束，共 %d 轮" % rounds)
+    relay()
     return 1 if any_fail else 0
 
 
 def main():
     now = time.time()
-    if BURST_MINUTES > 0:
-        return run_burst(now)
     if not WEBHOOK:
         log("未配置 NOTIFY_WEBHOOK_URL，跳过（部署占位，配置后自动生效）")
         return 0
-    return run_single(now)
+    if other_active() > 0:
+        log("已有实例在跑，本次触发秒退（断链后备不叠加）")
+        return 0
+    if BURST_MINUTES > 0:
+        return run_loop(now, force_burst=True)
+    return run_loop(now, force_burst=False)
 
 
 if __name__ == "__main__":
